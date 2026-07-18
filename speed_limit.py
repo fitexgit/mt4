@@ -1,10 +1,10 @@
 # speed_limit.py
 # محدودیت سرعت (Bandwidth Throttling) به‌ازای هر کانفیگ — پیاده‌سازی با الگوی Token Bucket
+# تمام وابستگی‌ها از state.py گرفته می‌شوند تا حلقه ایجاد نشود.
 
 import asyncio
 import time
 
-# وارد کردن متغیرها فقط از state.py 
 from state import LINKS
 
 _buckets: dict = {}
