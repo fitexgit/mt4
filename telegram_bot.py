@@ -7,32 +7,13 @@ import httpx
 
 from datetime import datetime, timedelta
 
-# تمام وابستگی‌ها از فایل state خوانده می‌شوند
+# تمام وابستگی‌ها، از جمله توابع لینک ساز را فقط از فایل state بخوان
 from state import (
-    LINKS,
-    make_link,
-    remove_link,
-    set_link_active,
-    vless_link_for_link,
-    get_host,
-    fmt_bytes,
-    is_link_allowed,
-    logger,
-    PROTOCOLS,
-    DEFAULT_PROTOCOL,
-    FINGERPRINTS,
-    DEFAULT_FINGERPRINT,
-    DEFAULT_ALPN_BY_PROTOCOL,
-    DEFAULT_PORT,
-    DEFAULT_SPEED_LIMIT,
-    MIN_PORT,
-    MAX_PORT,
-    parse_size_to_bytes,
-    parse_speed_to_bytes,
-    SUBS,
-    create_sub_group,
-    set_link_sub,
-    remove_sub_group,
+    LINKS, SUBS, PROTOCOLS, FINGERPRINTS, DEFAULT_PROTOCOL, DEFAULT_FINGERPRINT,
+    DEFAULT_ALPN_BY_PROTOCOL, DEFAULT_PORT, DEFAULT_SPEED_LIMIT, MIN_PORT, MAX_PORT,
+    make_link, remove_link, set_link_active, vless_link_for_link, get_host,
+    fmt_bytes, is_link_allowed, logger, parse_size_to_bytes, parse_speed_to_bytes,
+    create_sub_group, set_link_sub, remove_sub_group
 )
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
