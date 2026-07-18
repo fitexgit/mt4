@@ -11,9 +11,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import httpx
 
-# دریافت تمام متغیرهای سراسری از state.py به جای اینکه درون این فایل تعریف شوند
+# دریافت تمام متغیرهای سراسری فقط از state.py 
 from state import *
 import state # برای دستکاری مقادیر داخلی مانند http_client
+
+# وارد کردن مستقیم ماژول ها (بدون try/except که باعث مخفی شدن خطاها می‌شد)
+from relay_vless import websocket_tunnel
+from xhttp_siz10 import router as xhttp_router
 
 app = FastAPI(title="X4G", docs_url=None, redoc_url=None)
 
@@ -513,18 +517,13 @@ async def delete_link(uid: str, _=Depends(require_auth)):
 # ══════════════════════════════════════════════════════════════════════════════
 # VLESS Relay
 # ══════════════════════════════════════════════════════════════════════════════
-
-from relay_vless import websocket_tunnel
 app.add_api_websocket_route("/ws/{uuid}", websocket_tunnel)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # XHTTP
 # ══════════════════════════════════════════════════════════════════════════════
-try:
-    from xhttp_siz10 import router as xhttp_router
-    app.include_router(xhttp_router)
-except ImportError:
-    logger.warning("xhttp_siz10 module not found, XHTTP features will be disabled.")
+# اضافه کردن صریح و بدون خطای مخفی
+app.include_router(xhttp_router)
 
 # ── HTTP Proxy ────────────────────────────────────────────────────────────────
 _HOP = {"connection","keep-alive","proxy-authenticate","proxy-authorization",
