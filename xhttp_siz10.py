@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 
-# وارد کردن تمام وابستگی‌های state از state.py
+# 🛑 اصلاح مهم: تمام متغیرها مستقیما از state.py ایمپورت می‌شوند.
 from state import (
     LINKS,
     LINKS_LOCK,
@@ -34,8 +34,7 @@ SESSION_IDLE_TIMEOUT = 30
 REAPER_INTERVAL = 10
 TCP_CONNECT_TIMEOUT = 10.0
 
-# ── تنظیمات موتور تطبیقی ──────────────────────────────────────────────────────
-SOCK_BUF_SIZE = 2 * 1024 * 1024     # SO_SNDBUF / SO_RCVBUF
+SOCK_BUF_SIZE = 2 * 1024 * 1024     
 
 FLOW_MIN_HW = 256 * 1024
 FLOW_MAX_HW = 16 * 1024 * 1024
