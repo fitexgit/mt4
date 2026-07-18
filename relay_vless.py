@@ -1,6 +1,5 @@
 # relay_vless.py
-# بخش VLESS Relay — جدا شده از main.py و متصل شده به state.py برای رفع Circular Import
-# تغییر: ثبت IP واقعی کلاینت (با احتساب هدر x-forwarded-for پشت پراکسی) در connections
+# بخش VLESS Relay
 
 import asyncio
 import secrets
@@ -8,7 +7,7 @@ from datetime import datetime
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-# دریافت متغیرها و وضعیت از فایل state
+# دریافت متغیرها و وضعیت فقط از فایل state
 from state import (
     LINKS,
     LINKS_LOCK,
