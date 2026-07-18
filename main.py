@@ -2,20 +2,18 @@ import asyncio
 import secrets
 import time
 from datetime import datetime, timedelta
-from urllib.parse import quote
 import os
+import base64
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import Response, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import httpx
-import hashlib
 
-# Import all shared states and configurations to maintain backwards compatibility
-# with other files like telegram_bot.py, pages.py, etc.
+# دریافت تمام متغیرهای سراسری از state.py به جای اینکه درون این فایل تعریف شوند
 from state import *
-import state # for manipulating http_client reference
+import state # برای دستکاری مقادیر داخلی مانند http_client
 
 app = FastAPI(title="X4G", docs_url=None, redoc_url=None)
 
@@ -88,117 +86,6 @@ async def shutdown():
     if state.http_client:
         await state.http_client.aclose()
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def get_host(request: Request | None = None) -> str:
-    if request is not None:
-        h = request.headers.get("x-forwarded-host") or request.headers.get("host")
-        if h:
-            h = h.split(":")[0]
-            CONFIG["host"] = h
-            return h
-    return os.environ.get("RAILWAY_PUBLIC_DOMAIN", CONFIG["host"])
-
-def generate_uuid() -> str:
-    h = secrets.token_hex(16)
-    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
-
-def generate_vless_link(
-    uuid: str,
-    host: str,
-    remark: str = "X4G",
-    protocol: str = DEFAULT_PROTOCOL,
-    fingerprint: str | None = None,
-    alpn: str | None = None,
-    port: int | None = None,
-) -> str:
-    fp = (fingerprint or DEFAULT_FINGERPRINT).strip() or DEFAULT_FINGERPRINT
-    if fp not in FINGERPRINTS:
-        fp = DEFAULT_FINGERPRINT
-    alpn_val = (alpn or "").strip() or DEFAULT_ALPN_BY_PROTOCOL.get(protocol, "http/1.1")
-    port_val = port or DEFAULT_PORT
-    if not (MIN_PORT <= port_val <= MAX_PORT):
-        port_val = DEFAULT_PORT
-
-    if protocol == "vless-ws":
-        path = f"/ws/{uuid}"
-        params = {
-            "encryption": "none",
-            "security": "tls",
-            "type": "ws",
-            "host": host,
-            "path": path,
-            "sni": host,
-            "fp": fp,
-            "alpn": alpn_val,
-        }
-    else:
-        mode = protocol.replace("xhttp-", "")
-        path = f"/xhttp-siz10/{mode}/{uuid}"
-        params = {
-            "encryption": "none",
-            "security": "tls",
-            "type": "xhttp",
-            "mode": mode,
-            "host": host,
-            "path": path,
-            "sni": host,
-            "fp": fp,
-            "alpn": alpn_val,
-        }
-    query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-    return f"vless://{uuid}@{host}:{port_val}?{query}#{quote(remark)}"
-
-def vless_link_for_link(link: dict, uid: str, host: str) -> str:
-    proto = link.get("protocol", DEFAULT_PROTOCOL)
-    return generate_vless_link(
-        uid, host,
-        remark=f"X4G-{link.get('label','')}",
-        protocol=proto,
-        fingerprint=link.get("fingerprint"),
-        alpn=link.get("alpn"),
-        port=link.get("port"),
-    )
-
-def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else "نامشخص"
-
-# ── Default link ──────────────────────────────────────────────────────────────
-_default_link_created = False
-
-async def ensure_default_link():
-    global _default_link_created
-    if _default_link_created:
-        return
-    async with LINKS_LOCK:
-        if not any(l.get("is_default") for l in LINKS.values()):
-            uid = hashlib.sha256(f"default{CONFIG['secret']}".encode()).hexdigest()
-            uid = f"{uid[:8]}-{uid[8:12]}-{uid[12:16]}-{uid[16:20]}-{uid[20:32]}"
-            if uid not in LINKS:
-                LINKS[uid] = {
-                    "label": "لینک پیش‌فرض",
-                    "limit_bytes": 0,
-                    "used_bytes": 0,
-                    "created_at": datetime.now().isoformat(),
-                    "active": True,
-                    "expires_at": None,
-                    "note": "",
-                    "is_default": True,
-                    "sub_id": None,
-                    "protocol": DEFAULT_PROTOCOL,
-                    "fingerprint": DEFAULT_FINGERPRINT,
-                    "alpn": "",
-                    "port": DEFAULT_PORT,
-                    "ip_limit": 0,
-                    "speed_limit_bytes": DEFAULT_SPEED_LIMIT,
-                }
-                asyncio.create_task(save_state())
-        _default_link_created = True
 
 # ── Basic endpoints ───────────────────────────────────────────────────────────
 @app.get("/")
@@ -212,7 +99,7 @@ async def health():
 # ── Subscription (single link) ────────────────────────────────────────────────
 @app.get("/sub/{uuid}")
 async def subscription_single(uuid: str, request: Request):
-    import base64
+    from urllib.parse import quote
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
     if not link or not is_link_allowed(link):
@@ -225,7 +112,6 @@ async def subscription_single(uuid: str, request: Request):
 
 @app.get("/sub-all")
 async def subscription_all(request: Request, _=Depends(require_auth)):
-    import base64
     host = get_host(request)
     async with LINKS_LOCK:
         lines = [
@@ -246,25 +132,14 @@ async def create_sub(request: Request, _=Depends(require_auth)):
     name = (body.get("name") or "گروه جدید").strip()[:60]
     desc = (body.get("desc") or "").strip()[:200]
     password = (body.get("password") or "").strip()
-    sub_id = generate_uuid()
-    uuid_key = secrets.token_urlsafe(16)
-    async with SUBS_LOCK:
-        SUBS[sub_id] = {
-            "name": name,
-            "desc": desc,
-            "password_hash": hash_password(password) if password else None,
-            "uuid_key": uuid_key,
-            "created_at": datetime.now().isoformat(),
-            "link_ids": [],
-        }
-    asyncio.create_task(save_state())
-    log_activity("sub", f"گروه «{name}» ساخته شد", "ok")
+    sub_id, sub_data = await create_sub_group(name, desc, password)
+    
     host = get_host(request)
     return {
         "sub_id": sub_id,
-        **SUBS[sub_id],
-        "public_url": f"https://{host}/p/{uuid_key}",
-        "sub_url": f"https://{host}/sub-group/{uuid_key}",
+        **sub_data,
+        "public_url": f"https://{host}/p/{sub_data['uuid_key']}",
+        "sub_url": f"https://{host}/sub-group/{sub_data['uuid_key']}",
     }
 
 @app.get("/api/subs")
@@ -315,17 +190,9 @@ async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
 
 @app.delete("/api/subs/{sub_id}")
 async def delete_sub(sub_id: str, _=Depends(require_auth)):
-    async with SUBS_LOCK:
-        if sub_id not in SUBS:
-            raise HTTPException(status_code=404, detail="sub not found")
-        name = SUBS[sub_id].get("name", sub_id)
-        del SUBS[sub_id]
-    async with LINKS_LOCK:
-        for link in LINKS.values():
-            if link.get("sub_id") == sub_id:
-                link["sub_id"] = None
-    asyncio.create_task(save_state())
-    log_activity("sub", f"گروه «{name}» حذف شد", "warn")
+    name = await remove_sub_group(sub_id)
+    if name is None:
+        raise HTTPException(status_code=404, detail="sub not found")
     return {"ok": True, "deleted": sub_id}
 
 @app.post("/api/subs/{sub_id}/links")
@@ -333,27 +200,21 @@ async def assign_link_to_sub(sub_id: str, request: Request, _=Depends(require_au
     body = await request.json()
     link_id = str(body.get("link_id", ""))
     action = str(body.get("action", "add"))
-    async with SUBS_LOCK:
-        if sub_id not in SUBS:
-            raise HTTPException(status_code=404, detail="sub not found")
-        s = SUBS[sub_id]
-        ids = s.setdefault("link_ids", [])
-        if action == "add":
-            if link_id not in ids:
-                ids.append(link_id)
-        else:
-            if link_id in ids:
-                ids.remove(link_id)
-    async with LINKS_LOCK:
-        if link_id in LINKS:
-            LINKS[link_id]["sub_id"] = sub_id if action == "add" else None
-    asyncio.create_task(save_state())
+    
+    if action == "add":
+        ok = await set_link_sub(link_id, sub_id)
+    else:
+        ok = await set_link_sub(link_id, None)
+        
+    if not ok:
+        raise HTTPException(status_code=404, detail="link or sub not found")
+        
     return {"ok": True}
 
 # ── Public sub-group subscription file ───────────────────────────────────────
 @app.get("/sub-group/{uuid_key}")
 async def sub_group_subscription(uuid_key: str, request: Request):
-    import base64
+    from urllib.parse import quote
     async with SUBS_LOCK:
         sub = next((s for s in SUBS.values() if s.get("uuid_key") == uuid_key), None)
     if not sub:
@@ -504,143 +365,6 @@ async def get_connections(_=Depends(require_auth)):
         "count": len(result),
         "raw_count": len(connections),
     }
-
-# ── Shared link create/delete helpers ─────────────────────────────────────────
-async def make_link(
-    label: str = "لینک جدید",
-    limit_bytes: int = 0,
-    expires_at: str | None = None,
-    note: str = "",
-    sub_id: str | None = None,
-    protocol: str = DEFAULT_PROTOCOL,
-    fingerprint: str = DEFAULT_FINGERPRINT,
-    alpn: str = "",
-    port: int = DEFAULT_PORT,
-    ip_limit: int = 0,
-    speed_limit_bytes: int = 0,
-) -> tuple[str, dict]:
-    if protocol not in PROTOCOLS:
-        protocol = DEFAULT_PROTOCOL
-    fingerprint = (fingerprint or DEFAULT_FINGERPRINT).strip().lower()
-    if fingerprint not in FINGERPRINTS:
-        fingerprint = DEFAULT_FINGERPRINT
-    if not (MIN_PORT <= port <= MAX_PORT):
-        port = DEFAULT_PORT
-    uid = generate_uuid()
-    async with LINKS_LOCK:
-        LINKS[uid] = {
-            "label": (label or "لینک جدید").strip()[:60] or "لینک جدید",
-            "limit_bytes": max(0, limit_bytes),
-            "used_bytes": 0,
-            "created_at": datetime.now().isoformat(),
-            "active": True,
-            "expires_at": expires_at,
-            "note": (note or "").strip()[:200],
-            "is_default": False,
-            "sub_id": sub_id,
-            "protocol": protocol,
-            "fingerprint": fingerprint,
-            "alpn": (alpn or "").strip()[:100],
-            "port": port,
-            "ip_limit": max(0, ip_limit),
-            "speed_limit_bytes": max(0, speed_limit_bytes),
-        }
-    if sub_id:
-        async with SUBS_LOCK:
-            if sub_id in SUBS:
-                ids = SUBS[sub_id].setdefault("link_ids", [])
-                if uid not in ids:
-                    ids.append(uid)
-    asyncio.create_task(save_state())
-    log_activity("link", f"کانفیگ «{LINKS[uid]['label']}» ساخته شد", "ok")
-    return uid, LINKS[uid]
-
-async def remove_link(uid: str) -> str | None:
-    async with LINKS_LOCK:
-        if uid not in LINKS:
-            return None
-        label = LINKS[uid].get("label", uid)
-        sub_id = LINKS[uid].get("sub_id")
-        del LINKS[uid]
-    if sub_id:
-        async with SUBS_LOCK:
-            if sub_id in SUBS:
-                ids = SUBS[sub_id].get("link_ids", [])
-                if uid in ids:
-                    ids.remove(uid)
-    asyncio.create_task(save_state())
-    log_activity("link", f"کانفیگ «{label}» حذف شد", "err")
-    return label
-
-async def set_link_active(uid: str, active: bool) -> dict | None:
-    async with LINKS_LOCK:
-        if uid not in LINKS:
-            return None
-        LINKS[uid]["active"] = bool(active)
-        label = LINKS[uid]["label"]
-    log_activity("link", f"کانفیگ «{label}» {'فعال' if active else 'غیرفعال'} شد", "ok" if active else "warn")
-    asyncio.create_task(save_state())
-    return LINKS[uid]
-
-# ── Sub-group helpers ─────────────────────────────────────────────────────────
-async def create_sub_group(name: str = "گروه جدید", desc: str = "", password: str = "") -> tuple[str, dict]:
-    name = (name or "گروه جدید").strip()[:60]
-    desc = (desc or "").strip()[:200]
-    password = (password or "").strip()
-    sub_id = generate_uuid()
-    uuid_key = secrets.token_urlsafe(16)
-    async with SUBS_LOCK:
-        SUBS[sub_id] = {
-            "name": name,
-            "desc": desc,
-            "password_hash": hash_password(password) if password else None,
-            "uuid_key": uuid_key,
-            "created_at": datetime.now().isoformat(),
-            "link_ids": [],
-        }
-    asyncio.create_task(save_state())
-    log_activity("sub", f"گروه «{name}» ساخته شد", "ok")
-    return sub_id, SUBS[sub_id]
-
-async def set_link_sub(uid: str, sub_id: str | None) -> bool:
-    async with LINKS_LOCK:
-        if uid not in LINKS:
-            return False
-        old_sub = LINKS[uid].get("sub_id")
-        label = LINKS[uid].get("label", uid)
-    if sub_id is not None:
-        async with SUBS_LOCK:
-            if sub_id not in SUBS:
-                return False
-    async with SUBS_LOCK:
-        if old_sub and old_sub in SUBS:
-            ids = SUBS[old_sub].get("link_ids", [])
-            if uid in ids:
-                ids.remove(uid)
-        if sub_id and sub_id in SUBS:
-            ids = SUBS[sub_id].setdefault("link_ids", [])
-            if uid not in ids:
-                ids.append(uid)
-    async with LINKS_LOCK:
-        if uid in LINKS:
-            LINKS[uid]["sub_id"] = sub_id
-    asyncio.create_task(save_state())
-    log_activity("link", f"کانفیگ «{label}» {'به گروه اضافه شد' if sub_id else 'از گروه خارج شد'}", "info")
-    return True
-
-async def remove_sub_group(sub_id: str) -> str | None:
-    async with SUBS_LOCK:
-        if sub_id not in SUBS:
-            return None
-        name = SUBS[sub_id].get("name", sub_id)
-        del SUBS[sub_id]
-    async with LINKS_LOCK:
-        for link in LINKS.values():
-            if link.get("sub_id") == sub_id:
-                link["sub_id"] = None
-    asyncio.create_task(save_state())
-    log_activity("sub", f"گروه «{name}» حذف شد", "warn")
-    return name
 
 # ── Link Management ───────────────────────────────────────────────────────────
 @app.post("/api/links")
