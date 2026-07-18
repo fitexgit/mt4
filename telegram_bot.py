@@ -1,9 +1,4 @@
 # telegram_bot.py
-# ══════════════════════════════════════════════════════════════════════════════
-# ربات مدیریت تلگرام — ساخت/حذف/فعال‌غیرفعال/مشاهده‌ی کانفیگ‌ها، فقط برای ادمین‌های
-# مجاز (TELEGRAM_ADMIN_IDS). با long polling کار می‌کنه، نیازی به دامنه/webhook نداره.
-# ══════════════════════════════════════════════════════════════════════════════
-
 import asyncio
 import os
 import re
@@ -12,7 +7,8 @@ import httpx
 
 from datetime import datetime, timedelta
 
-from main import (
+# تمام وابستگی‌ها از فایل state خوانده می‌شوند
+from state import (
     LINKS,
     make_link,
     remove_link,
@@ -49,11 +45,8 @@ PAGE_SIZE = 6
 _client: httpx.AsyncClient | None = None
 _poll_task: asyncio.Task | None = None
 _running = False
-_pending: dict = {}   # chat_id -> {"action": "wizard", "step": "...", "data": {...}}
+_pending: dict = {}   
 
-# ── Config creation wizard ────────────────────────────────────────────────────
-# مراحل ساخت کانفیگ جدید، دقیقاً هم‌راستا با فیلدهایی که پنل وب موقع ساخت کاربر می‌گیره:
-# برچسب، پروتکل، fingerprint، ALPN، پورت، محدودیت حجم، محدودیت سرعت، محدودیت آی‌پی، روز انقضا.
 WIZARD_STEPS = ["label", "protocol", "fingerprint", "alpn", "port", "volume", "speed", "iplimit", "days"]
 
 PROTOCOL_LABELS = {
@@ -73,7 +66,6 @@ _VOLUME_RE = re.compile(r"^([\d.]+)\s*(GB|MB|KB)?$", re.IGNORECASE)
 _SPEED_RE = re.compile(r"^([\d.]+)\s*(MBIT|MBPS|MB|KB)?$", re.IGNORECASE)
 
 def _parse_volume_text(text: str):
-    """ورودی مثل '10GB' یا '500 MB' رو به بایت تبدیل می‌کنه. اگه نامعتبر بود None برمی‌گردونه."""
     m = _VOLUME_RE.match(text.strip())
     if not m:
         return None
@@ -87,7 +79,6 @@ def _parse_volume_text(text: str):
     return parse_size_to_bytes(value, unit)
 
 def _parse_speed_text(text: str):
-    """ورودی مثل '20' یا '20Mbit' رو به بایت‌بر‌ثانیه تبدیل می‌کنه (پیش‌فرض واحد Mbit)."""
     m = _SPEED_RE.match(text.strip())
     if not m:
         return None
@@ -108,7 +99,6 @@ def _parse_nonneg_int(text: str):
         return None
     return max(0, n)
 
-# ── Telegram API helpers ────────────────────────────────────────────────────
 async def _call(method: str, **params):
     if _client is None:
         return None
@@ -134,7 +124,6 @@ async def _edit(chat_id: int, message_id: int, text: str, kb: dict | None = None
         payload["reply_markup"] = kb
     res = await _call("editMessageText", **payload)
     if res is None or not res.get("ok"):
-        # اگه ادیت به هر دلیلی نشد (مثلاً پیام قدیمی/حذف‌شده)، پیام جدید بفرست
         await _send(chat_id, text, kb)
 
 async def _answer_cb(cb_id: str, text: str = ""):
@@ -143,7 +132,6 @@ async def _answer_cb(cb_id: str, text: str = ""):
 def _is_admin(chat_id: int) -> bool:
     return chat_id in ADMIN_IDS
 
-# ── Keyboards ────────────────────────────────────────────────────────────────
 def _main_menu_kb():
     return {"inline_keyboard": [
         [{"text": "📋 لیست کانفیگ‌ها", "callback_data": "list:0"}],
@@ -187,7 +175,6 @@ def _confirm_delete_kb(uid: str):
          {"text": "❌ انصراف", "callback_data": f"view:{uid}"}],
     ]}
 
-# ── Wizard keyboards ─────────────────────────────────────────────────────────
 def _wizard_cancel_kb():
     return {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "w:cancel"}]]}
 
@@ -278,7 +265,6 @@ def _wizard_summary(data: dict) -> str:
         f"انقضا: {days_txt}"
     )
 
-# ── View builders ────────────────────────────────────────────────────────────
 def _format_detail(uid: str, l: dict) -> str:
     status = "🟢 فعال" if is_link_allowed(l) else "🔴 غیرفعال/منقضی"
     limit = "نامحدود" if not l.get("limit_bytes") else fmt_bytes(l["limit_bytes"])
@@ -301,7 +287,6 @@ def _format_detail(uid: str, l: dict) -> str:
         f"UUID: <code>{uid}</code>"
     )
 
-# ── Sub-group (لینک ساب حرفه‌ای) view builders ────────────────────────────────
 def _group_public_url(s: dict) -> str:
     host = get_host()
     return f"https://{host}/p/{s.get('uuid_key','')}"
@@ -352,7 +337,6 @@ def _confirm_subdel_kb(sid: str):
     ]}
 
 def _pick_link_for_group_kb(sid: str, page: int):
-    """لیست همه‌ی کانفیگ‌ها برای انتخاب و افزودن به یک گروه ساب مشخص."""
     items = sorted(LINKS.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
     total = len(items)
     start = page * PAGE_SIZE
@@ -371,7 +355,6 @@ def _pick_link_for_group_kb(sid: str, page: int):
     rows.append([{"text": "⬅ بازگشت به گروه", "callback_data": f"subview:{sid}"}])
     return {"inline_keyboard": rows}
 
-# ── Per-config "group" (ساب لینک حرفه‌ای) view builders ───────────────────────
 def _cfg_group_kb(uid: str):
     link = LINKS.get(uid, {})
     sid = link.get("sub_id")
@@ -401,7 +384,6 @@ def _format_cfg_group(uid: str) -> str:
         "برای گرفتن لینک ساب حرفه‌ای (صفحه‌ی زیبا)، این کانفیگ رو به یک گروه اضافه کن یا یه گروه جدید بساز:"
     )
 
-# ── Update handling ──────────────────────────────────────────────────────────
 async def _handle_message(msg: dict):
     chat_id = msg.get("chat", {}).get("id")
     text = (msg.get("text") or "").strip()
@@ -446,7 +428,6 @@ async def _handle_message(msg: dict):
             return
 
         if step in ("protocol", "fingerprint"):
-            # این دو مرحله فقط با دکمه انتخاب می‌شن
             kb = _wizard_protocol_kb() if step == "protocol" else _wizard_fp_kb()
             await _send(chat_id, "لطفاً از دکمه‌های بالا یکی رو انتخاب کن 👆", kb)
             return
@@ -510,7 +491,6 @@ async def _handle_message(msg: dict):
             await _send(chat_id, _wizard_summary(data), _wizard_confirm_kb())
             return
 
-    # پیام ناشناخته → منو رو نشون بده
     await _send(chat_id, "از دکمه‌های زیر استفاده کن:", _main_menu_kb())
 
 async def _handle_callback(cb: dict):
@@ -537,7 +517,6 @@ async def _handle_callback(cb: dict):
         await _edit(chat_id, message_id, f"📋 لیست کانفیگ‌ها ({len(LINKS)} مورد):", _links_list_kb(page))
         return
 
-    # ── گروه‌های ساب (لینک حرفه‌ای) ────────────────────────────────────────────
     if data.startswith("subs:"):
         page = int(data.split(":", 1)[1] or 0)
         if not SUBS:
@@ -606,7 +585,6 @@ async def _handle_callback(cb: dict):
             await _edit(chat_id, message_id, f"🗑 گروه «{name}» حذف شد.", _main_menu_kb())
         return
 
-    # ── گروه یک کانفیگ خاص (از صفحه‌ی جزئیات کانفیگ) ───────────────────────────
     if data.startswith("cfggroup:"):
         uid = data.split(":", 1)[1]
         if uid not in LINKS:
@@ -744,7 +722,6 @@ async def _handle_callback(cb: dict):
             await _edit(chat_id, message_id, f"✅ کانفیگ ساخته شد.\n\n{_format_detail(uid, link)}", _link_detail_kb(uid, link["active"]))
             return
 
-        # هیچ‌کدوم از حالت‌های بالا مچ نشد (مثلاً روی دکمه‌ی مرحله‌ی قبلی که دیگه معتبر نیست زده)
         await _answer_cb(cb_id, "این دکمه دیگه معتبر نیست.")
         return
 
@@ -802,7 +779,6 @@ async def _handle_callback(cb: dict):
             await _edit(chat_id, message_id, f"🗑 کانفیگ «{label}» حذف شد.", _main_menu_kb())
         return
 
-# ── Polling loop ─────────────────────────────────────────────────────────────
 async def _poll_loop():
     global _running
     offset = 0
@@ -828,7 +804,6 @@ async def _poll_loop():
             logger.warning(f"Telegram poll loop error: {e}")
             await asyncio.sleep(3)
 
-# ── Lifecycle ────────────────────────────────────────────────────────────────
 async def start_bot():
     global _client, _poll_task, _running
     if not BOT_TOKEN:
