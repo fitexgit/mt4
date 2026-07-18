@@ -1,10 +1,5 @@
 # xhttp_siz10.py
-# ══════════════════════════════════════════════════════════════════════════════
-# Siz10a · XHTTP Ultra Transport — دو مد: packet-up / stream-up
-#  (stream-one حذف شد. منطق relay_vless دست‌نخورده.
-#   stream-up بازنویسی شده با موتور تطبیقی: _AdaptiveFlow (AIMD روی high-water)
-#   + _QuotaGate تطبیقی (batch بر اساس نرخ واقعی هر سشن) + سوکت تیون‌شده)
-# ══════════════════════════════════════════════════════════════════════════════
+# Siz10a · XHTTP Ultra Transport
 
 import asyncio
 import secrets
@@ -15,7 +10,8 @@ from datetime import datetime
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 
-from main import (
+# وارد کردن تمام وابستگی‌های state از state.py
+from state import (
     LINKS,
     LINKS_LOCK,
     stats,
@@ -41,20 +37,18 @@ TCP_CONNECT_TIMEOUT = 10.0
 # ── تنظیمات موتور تطبیقی ──────────────────────────────────────────────────────
 SOCK_BUF_SIZE = 2 * 1024 * 1024     # SO_SNDBUF / SO_RCVBUF
 
-# _AdaptiveFlow: بازه‌ی مجاز برای high-water تطبیقی (AIMD)
 FLOW_MIN_HW = 256 * 1024
 FLOW_MAX_HW = 16 * 1024 * 1024
 FLOW_START_HW = 2 * 1024 * 1024
-FLOW_FAST_DRAIN_MS = 2.0    # زیر این یعنی downstream خیلی سریعه → بافر مجاز رو زیاد کن
-FLOW_SLOW_DRAIN_MS = 25.0   # بالای این یعنی backpressure واقعی → فوری نصفش کن
+FLOW_FAST_DRAIN_MS = 2.0    
+FLOW_SLOW_DRAIN_MS = 25.0   
 
-# _QuotaGate: بازه‌ی مجاز برای batch تطبیقی چک کوتا
 QUOTA_MIN_BATCH = 32 * 1024
 QUOTA_MAX_BATCH = 1 * 1024 * 1024
 QUOTA_START_BATCH = 64 * 1024
-QUOTA_CHECK_INTERVAL = 0.2  # سقف زمانی؛ حتی اگر batch پر نشده، بعد این مدت چک کن
+QUOTA_CHECK_INTERVAL = 0.2  
 
-PACKET_UP_HIGH_WATER = 2 * 1024 * 1024  # packet-up همون منطق ساده‌ی قبلی رو داره (تمرکز این راند فقط stream-up بود)
+PACKET_UP_HIGH_WATER = 2 * 1024 * 1024  
 
 xhttp_sessions: dict = {}
 XHTTP_LOCK = asyncio.Lock()
@@ -74,13 +68,10 @@ FINGERPRINTS = {
 }
 DEFAULT_FINGERPRINT = "chrome"
 
-
 def _resp_headers(fp: str) -> dict:
     return dict(FINGERPRINTS.get(fp, FINGERPRINTS[DEFAULT_FINGERPRINT]))
 
-
 def _tune_socket(writer: asyncio.StreamWriter):
-    """TCP_NODELAY + بافرهای بزرگ‌تر سوکت برای کاهش سربار سیستم‌عامل روی ترافیک بالا."""
     sock = writer.transport.get_extra_info("socket")
     if not sock:
         return
@@ -91,17 +82,7 @@ def _tune_socket(writer: asyncio.StreamWriter):
     except OSError:
         pass
 
-
 class _QuotaGate:
-    """
-    نسخه‌ی تطبیقی: به‌جای await check_and_use() به‌ازای هر چانک، و به‌جای یک آستانه‌ی
-    ثابت، نرخ واقعی ترافیک هر سشن رو با EWMA اندازه می‌گیره و اندازه‌ی batch رو زنده
-    عوض می‌کنه:
-      - سشن پرسرعت (دانلود حجیم) → batch بزرگ می‌شه → await های سنگین کمتر.
-      - سشن کم‌ترافیک/تعاملی → batch کوچیک می‌مونه → کوتا دقیق‌تر و قطع سریع‌تر
-        اگه کاربر تموم کرده باشه.
-    داده هیچ‌وقت نگه داشته نمی‌شه، فقط لحظه‌ی چک‌کردنِ کوتا adaptive هست.
-    """
     __slots__ = ("uuid", "pending", "last_check", "ok", "batch_bytes", "rate_ewma")
 
     def __init__(self, uuid: str):
@@ -136,18 +117,7 @@ class _QuotaGate:
             self.ok = self.ok and await check_and_use(self.uuid, flush)
         return self.ok
 
-
 class _AdaptiveFlow:
-    """
-    high-water تطبیقی برای drain(), رفتار شبیه AIMD در TCP congestion control:
-      - هر بار drain() صدا زده می‌شه، مدت زمانش اندازه‌گیری می‌شه.
-      - اگه سریع تموم بشه (لینک پایین‌دستی داره جواب می‌ده) → سقف بافر مجاز رو
-        additive increase می‌کنیم؛ یعنی دفعه‌ی بعد دیرتر drain صدا زده می‌شه،
-        پس syscall/context-switch کمتر می‌شه و throughput واقعی بالا می‌ره.
-      - اگه drain کند بشه (backpressure واقعیه، صف داره جمع می‌شه) → سقف رو فوری
-        نصف می‌کنیم (multiplicative decrease) تا بافربلوت/لتنسی رشد نکنه.
-    هر سشن یک نمونه‌ی جدا از این داره، پس مسیرهای کند و سریع تداخلی با هم ندارن.
-    """
     __slots__ = ("high_water", "last_drain_ms")
 
     def __init__(self):
@@ -167,7 +137,6 @@ class _AdaptiveFlow:
         elif elapsed_ms > FLOW_SLOW_DRAIN_MS:
             self.high_water = max(FLOW_MIN_HW, self.high_water // 2)
 
-
 def _req_client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
@@ -176,7 +145,6 @@ def _req_client_ip(request: Request) -> str:
     if real_ip:
         return real_ip.strip()
     return request.client.host if request.client else "نامشخص"
-
 
 async def _open_tcp_from_header(first_chunk: bytes):
     command, address, port, payload = await parse_vless_header(first_chunk)
@@ -189,16 +157,13 @@ async def _open_tcp_from_header(first_chunk: bytes):
         await writer.drain()
     return reader, writer, address, port
 
-
 async def _check_link(uuid: str):
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
     if not is_link_allowed(link):
         raise HTTPException(status_code=403, detail="not authorized")
 
-
 async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str = "نامشخص") -> dict:
-    """Session بر اساس session_id که خودِ کلاینت در URL فرستاده، lazily ساخته می‌شه."""
     async with XHTTP_LOCK:
         sess = xhttp_sessions.get(session_id)
         if sess is not None:
@@ -226,13 +191,12 @@ async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str 
             "last_seen": time.time(),
             "conn_id": conn_id, "tcp_open": False, "closed": False,
             "seq_buf": {}, "next_seq": 0,
-            "gate": None,  # لازی ساخته می‌شه: _QuotaGate تطبیقی مخصوص stream-up
-            "flow": None,  # لازی ساخته می‌شه: _AdaptiveFlow مخصوص stream-up
+            "gate": None,  
+            "flow": None,  
         }
         xhttp_sessions[session_id] = sess
         logger.info(f"new XHTTP[{mode}] session [{session_id[:8]}] uuid={uuid[:8]} ip={ip}")
         return sess
-
 
 async def _teardown(session_id: str):
     async with XHTTP_LOCK:
@@ -264,7 +228,6 @@ async def _teardown(session_id: str):
             pass
     logger.info(f"closed XHTTP[{sess.get('mode')}] [{session_id[:8]}] total={len(xhttp_sessions)}")
 
-
 async def _reaper():
     while True:
         await asyncio.sleep(REAPER_INTERVAL)
@@ -275,9 +238,7 @@ async def _reaper():
         for sid in stale:
             await _teardown(sid)
 
-
 _reaper_started = False
-
 
 def ensure_reaper():
     global _reaper_started
@@ -285,10 +246,9 @@ def ensure_reaper():
         asyncio.create_task(_reaper())
         _reaper_started = True
 
-
 async def _pump_tcp_to_queue(session_id: str, uuid: str, reader: asyncio.StreamReader, down_q: asyncio.Queue):
     first = True
-    gate = _QuotaGate(uuid)  # دانلینک هم از همون گیت batched استفاده می‌کنه
+    gate = _QuotaGate(uuid)  
     try:
         while True:
             data = await reader.read(XHTTP_BUF)
@@ -312,9 +272,7 @@ async def _pump_tcp_to_queue(session_id: str, uuid: str, reader: asyncio.StreamR
         await gate.flush()
         await _teardown(session_id)
 
-
 async def _open_tcp_for_session(session_id: str, uuid: str, sess: dict, first_chunk: bytes):
-    """تونل TCP رو از روی هدر VLESS باز می‌کنه و پمپ دانلینک رو راه می‌اندازه."""
     reader, writer, address, port = await _open_tcp_from_header(first_chunk)
     logger.info(f"connect XHTTP[{sess['mode']}] [{session_id[:8]}] -> {address}:{port}")
     sess["writer"] = writer
@@ -323,7 +281,6 @@ async def _open_tcp_for_session(session_id: str, uuid: str, sess: dict, first_ch
         _pump_tcp_to_queue(session_id, uuid, reader, sess["down_q"])
     )
     asyncio.create_task(save_state())
-
 
 def _downstream_gen(sess: dict):
     async def gen():
@@ -338,8 +295,6 @@ def _downstream_gen(sess: dict):
             pass
     return gen()
 
-
-# ══════════════════════════════ GET دانلینک (مشترک بین سه مد) ══════════════════════════════
 @router.get("/xhttp-siz10/{mode}/{uuid}/{session_id}")
 async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request):
     ensure_reaper()
@@ -354,8 +309,6 @@ async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request
     headers = _resp_headers(fp)
     return StreamingResponse(_downstream_gen(sess), headers=headers, media_type=headers["content-type"])
 
-
-# ══════════════════════════════ PACKET-UP (آپلینک با seq) ══════════════════════════════
 @router.post("/xhttp-siz10/packet-up/{uuid}/{session_id}/{seq}")
 async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Request):
     ensure_reaper()
@@ -378,13 +331,10 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
 
     try:
         if sess["writer"] is None:
-            # اولین پکتی که حاوی هدر VLESS است، می‌تونه seq=0 نباشه اگر پکت‌ها
-            # خارج از ترتیب برسن؛ بافر کوچیک برای سورت کردن seqهای زودرس.
             if seq != 0:
                 sess["seq_buf"][seq] = body
                 return {"ok": True, "buffered": True}
             await _open_tcp_for_session(session_id, uuid, sess, body)
-            # هر پکت بافرشده‌ای که حالا نوبتش رسیده رو هم بفرست
             nxt = 1
             while nxt in sess["seq_buf"]:
                 pending = sess["seq_buf"].pop(nxt)
@@ -412,11 +362,6 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
 
     return {"ok": True}
 
-
-# ══════════════════════════════ STREAM-UP (یک POST پیوسته) ══════════════════════════════
-# موتور تطبیقی: _QuotaGate (batch کوتا بر اساس نرخ واقعی) + _AdaptiveFlow (AIMD روی
-# high-water درین) + کش رفرنس‌ها داخل لوپ. هیچ داده‌ای بافر/coalesce نمی‌شه —
-# هر بایت فوری write() می‌شه، فقط «کِی صبر کنیم برای drain» تطبیقیه.
 @router.post("/xhttp-siz10/stream-up/{uuid}/{session_id}")
 async def stream_up_upload(uuid: str, session_id: str, request: Request):
     ensure_reaper()
@@ -434,8 +379,8 @@ async def stream_up_upload(uuid: str, session_id: str, request: Request):
         flow = _AdaptiveFlow()
         sess["flow"] = flow
 
-    conn = connections[sess["conn_id"]]   # یک بار لوک‌آپ، نه هر چانک
-    writer = sess["writer"]               # ممکنه هنوز None باشه
+    conn = connections[sess["conn_id"]]   
+    writer = sess["writer"]               
 
     try:
         async for chunk in request.stream():
